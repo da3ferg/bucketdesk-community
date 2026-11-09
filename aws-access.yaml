@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+    BucketDesk self-hosted: the identity your own BucketDesk server uses in this account. A key that can
+    only assume one role, which can only assume the BucketDesk roles the in-app connection setup creates
+    (each checks its own external ID). Create this stack once, then save the file its output prints.
+
+Resources:
+    # Connection templates trust a role, so the server's key reaches AWS through this one.
+    PrincipalRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: !Sub 'BucketDeskSelfHosted-${AWS::Region}'
+            MaxSessionDuration: 3600
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Principal: { AWS: !GetAtt KeyUser.Arn }
+                      Action: 'sts:AssumeRole'
+            Policies:
+                - PolicyName: AssumeBucketDeskRoles
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action: ['sts:AssumeRole', 'sts:SetSourceIdentity']
+                            # Only the roles connection setup creates, never other roles that start with BucketDesk.
+                            Resource:
+                                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskAccess-*'
+                                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskDocumentChat-*'
+                                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskArchiveControl-*'
+                                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskBillingRead-*'
+                                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskTool-*'
+
+    KeyUser:
+        Type: AWS::IAM::User
+        Properties:
+            UserName: !Sub 'BucketDeskSelfHostedKey-${AWS::Region}'
+            Policies:
+                - PolicyName: AssumeSelfHostedRole
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action: 'sts:AssumeRole'
+                            # By name: GetAtt here would make the role and the user depend on each other.
+                            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskSelfHosted-${AWS::Region}'
+                          # A licence bound to your AWS Organization id is checked with this one read, in your account.
+                          - Effect: Allow
+                            Action: 'organizations:DescribeOrganization'
+                            Resource: '*'
+
+    AccessKey:
+        Type: AWS::IAM::AccessKey
+        Properties:
+            UserName: !Ref KeyUser
+
+    # The archive and convert job containers' own key. Those containers open customer files, so they never
+    # see the app's key: this one can only assume the BucketDeskArchiveServer roles connection setup makes.
+    JobsKeyUser:
+        Type: AWS::IAM::User
+        Properties:
+            UserName: !Sub 'BucketDeskSelfHostedJobs-${AWS::Region}'
+            Policies:
+                - PolicyName: AssumeArchiveServerRoles
+                  PolicyDocument:
+                      Version: '2012-10-17'
+                      Statement:
+                          - Effect: Allow
+                            Action: 'sts:AssumeRole'
+                            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/BucketDeskArchiveServer-*'
+
+    JobsAccessKey:
+        Type: AWS::IAM::AccessKey
+        Properties:
+            UserName: !Ref JobsKeyUser
+
+    JobsCredentialsFile:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+            Name: !Sub 'bucketdesk/self-hosted/${AWS::Region}/aws-jobs-credentials'
+            SecretString: !Sub |
+                [bucketdesk]
+                aws_access_key_id = ${JobsAccessKey}
+                aws_secret_access_key = ${JobsAccessKey.SecretAccessKey}
+
+                [profile bucketdesk]
+                region = ${AWS::Region}
+
+    # The server's whole AWS credentials file. It sits in Secrets Manager rather than a stack output,
+    # where anyone who can read the stack would see the key.
+    CredentialsFile:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+            Name: !Sub 'bucketdesk/self-hosted/${AWS::Region}/aws-credentials'
+            SecretString: !Sub |
+                [bucketdesk-key]
+                aws_access_key_id = ${AccessKey}
+                aws_secret_access_key = ${AccessKey.SecretAccessKey}
+                region = ${AWS::Region}
+
+                [profile bucketdesk]
+                role_arn = ${PrincipalRole.Arn}
+                source_profile = bucketdesk-key
+                region = ${AWS::Region}
+
+Outputs:
+    PrincipalArn:
+        Description: AWS_CUSTOMER_ACCESS_PRINCIPAL_ARN in .env
+        Value: !GetAtt PrincipalRole.Arn
+    CredentialsFileCommand:
+        Description: Run next to compose.yaml; writes aws/credentials for the server and aws/jobs/credentials for the job containers
+        Value: !Sub 'mkdir -p aws/jobs && aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${CredentialsFile} --query SecretString --output text > aws/credentials && aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${JobsCredentialsFile} --query SecretString --output text > aws/jobs/credentials && chmod 644 aws/credentials aws/jobs/credentials'

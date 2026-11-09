@@ -1,0 +1,154 @@
+# BucketDesk Community Edition. Start it with:
+#
+#   docker compose up -d
+#
+# then open http://localhost:8080. Every setting has a working default; put overrides in an
+# optional .env file next to this one (see .env.example).
+name: bucketdesk-community
+
+x-app: &app
+    image: public.ecr.aws/k0h2k1y4/bucketdesk/app:20261107-587b8706
+    env_file:
+        - path: .env
+          required: false
+    # On first start, make the app's encryption key and keep it in the secrets volume, so nobody has
+    # to generate one by hand. Every container reads the same key; whichever starts first writes it.
+    # Set APP_KEY in .env to use your own instead.
+    entrypoint:
+        - /bin/sh
+        - -c
+        - |
+            if [ -z "$${APP_KEY:-}" ]; then
+                umask 077
+                key=/app/storage/secrets/app-key
+                mkdir -p /app/storage/secrets
+                if [ ! -s "$$key" ]; then
+                    php -r 'echo "base64:".base64_encode(random_bytes(32));' > "$$key.$$$$"
+                    ln "$$key.$$$$" "$$key" 2>/dev/null || true
+                    rm -f "$$key.$$$$"
+                fi
+                export APP_KEY="$$(cat "$$key")"
+            fi
+            exec /usr/local/bin/bucketdesk-entrypoint "$$@"
+        - --
+    environment: &env
+        SELF_HOSTED: 'true'
+        SELF_HOSTED_LICENCE: ${SELF_HOSTED_LICENCE:-}
+        BUCKETDESK_VERSION: 20261107-587b8706
+        APP_NAME: BucketDesk
+        APP_ENV: production
+        APP_DEBUG: 'false'
+        APP_URL: ${APP_URL:-http://localhost:${BUCKETDESK_PORT:-8080}}
+        LOG_CHANNEL: stderr
+        DB_CONNECTION: pgsql
+        DB_HOST: postgres
+        DB_PORT: '5432'
+        DB_DATABASE: bucketdesk
+        DB_USERNAME: bucketdesk
+        DB_PASSWORD: ${DB_PASSWORD:-bucketdesk}
+        DB_SSLMODE: disable
+        SESSION_DRIVER: database
+        # Browsers drop secure cookies on plain http, so this turns on only with an https APP_URL.
+        SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+        SESSION_ENCRYPT: 'true'
+        CACHE_STORE: database
+        QUEUE_CONNECTION: database
+        QUEUE_PUBLISH_DEPTH: 'false'
+        # Mail goes to the bundled Mailpit inbox (http://localhost:8025) until you set your own server.
+        MAIL_MAILER: smtp
+        MAIL_HOST: ${MAIL_HOST:-mailpit}
+        MAIL_PORT: ${MAIL_PORT:-1025}
+        MAIL_SCHEME: ${MAIL_SCHEME:-}
+        MAIL_USERNAME: ${MAIL_USERNAME:-}
+        MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+        MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-bucketdesk@example.com}
+        MAIL_FROM_NAME: BucketDesk
+        # AWS access for connecting buckets (README, Connect your bucket). aws/credentials holds a key
+        # that can only assume the BucketDesk role in your account.
+        AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+        AWS_CUSTOMER_ACCESS_PRINCIPAL_ARN: ${AWS_CUSTOMER_ACCESS_PRINCIPAL_ARN:-}
+        AWS_OWNED_ACCOUNT_IDS: ''
+        AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+        AWS_CONFIG_FILE: /aws/credentials
+        AWS_PROFILE: bucketdesk
+        AWS_EC2_METADATA_DISABLED: 'true'
+        AWS_ONBOARDING_TEMPLATE_URL: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com/customer-role.yaml
+        AWS_BILLING_ONBOARDING_TEMPLATE_URL: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com/customer-billing-role.yaml
+        TOOLS_TEMPLATE_URL_BASE: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com
+        OFFICE_PREVIEW_ENABLED: 'false'
+        OFFLINE_CACHE_GB: ${OFFLINE_CACHE_GB:-10}
+    volumes:
+        - ./aws:/aws:ro
+        - secrets:/app/storage/secrets
+        - offline-cache:/app/storage/offline
+    # The image's health check probes Apache, which only web runs.
+    healthcheck:
+        disable: true
+    depends_on:
+        postgres:
+            condition: service_healthy
+    restart: unless-stopped
+
+services:
+    web:
+        <<: *app
+        command: ['apache2-foreground']
+        ports:
+            - '${BUCKETDESK_PORT:-8080}:8080'
+        environment:
+            <<: *env
+            RUN_MIGRATIONS_ON_START: 'true'
+        healthcheck:
+            test: ['CMD', 'php', '-r', "exit(@file_get_contents('http://127.0.0.1:8080/ready') === false ? 1 : 0);"]
+            interval: 10s
+            timeout: 5s
+            start_period: 60s
+            retries: 6
+
+    worker:
+        <<: *app
+        command: ['php', 'artisan', 'queue:work', '--queue=workspace-invitations,default', '--sleep=1', '--tries=3', '--max-time=3600']
+        depends_on:
+            web:
+                condition: service_healthy
+
+    storage-ops:
+        <<: *app
+        command: ['php', 'artisan', 'queue:work', '--queue=storage-ops', '--sleep=5', '--tries=1', '--max-time=7200']
+        depends_on:
+            web:
+                condition: service_healthy
+
+    scheduler:
+        <<: *app
+        command: ['php', 'artisan', 'schedule:work']
+        depends_on:
+            web:
+                condition: service_healthy
+
+    postgres:
+        image: public.ecr.aws/docker/library/postgres:17-alpine
+        environment:
+            POSTGRES_DB: bucketdesk
+            POSTGRES_USER: bucketdesk
+            POSTGRES_PASSWORD: ${DB_PASSWORD:-bucketdesk}
+        volumes:
+            - postgres-data:/var/lib/postgresql/data
+        healthcheck:
+            test: ['CMD-SHELL', 'pg_isready -U bucketdesk -d bucketdesk']
+            interval: 5s
+            timeout: 5s
+            retries: 10
+        restart: unless-stopped
+
+    # A local inbox for invitations, sign-up codes and password resets: http://localhost:8025.
+    mailpit:
+        image: axllent/mailpit:v1.27
+        ports:
+            - '127.0.0.1:${MAILPIT_PORT:-8025}:8025'
+        restart: unless-stopped
+
+volumes:
+    postgres-data:
+    secrets:
+    offline-cache:
