@@ -7,7 +7,7 @@
 name: bucketdesk-community
 
 x-app: &app
-    image: public.ecr.aws/k0h2k1y4/bucketdesk/app:20261107-587b8706
+    image: public.ecr.aws/k0h2k1y4/bucketdesk/app@sha256:edcf9cc5bc43c4c5d405e9997d150469b5387211ea1c872a4d47c5f6c65b1f28
     env_file:
         - path: .env
           required: false
@@ -34,7 +34,7 @@ x-app: &app
     environment: &env
         SELF_HOSTED: 'true'
         SELF_HOSTED_LICENCE: ${SELF_HOSTED_LICENCE:-}
-        BUCKETDESK_VERSION: 20261107-587b8706
+        BUCKETDESK_VERSION: 20261119-b3e31b5f
         APP_NAME: BucketDesk
         APP_ENV: production
         APP_DEBUG: 'false'
@@ -74,6 +74,7 @@ x-app: &app
         AWS_EC2_METADATA_DISABLED: 'true'
         AWS_ONBOARDING_TEMPLATE_URL: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com/customer-role.yaml
         AWS_BILLING_ONBOARDING_TEMPLATE_URL: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com/customer-billing-role.yaml
+        AWS_SETUP_TEMPLATE_URL_BASE: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com
         TOOLS_TEMPLATE_URL_BASE: https://bucketdeskproduction-onboardingtemplates40e3678d-b1zqtux0oqkm.s3.us-east-1.amazonaws.com
         OFFICE_PREVIEW_ENABLED: 'false'
         OFFLINE_CACHE_GB: ${OFFLINE_CACHE_GB:-10}
